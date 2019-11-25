@@ -6,6 +6,8 @@ library(purrr)
 library(pwr)
 library(ggplot2)
 
+theme_set(theme_classic(base_size = 15))
+
 ### Read in data
 
 ## BBS
@@ -193,8 +195,6 @@ bcr_power <- power_analysis_output(bcr_turnover_mod, pvals) %>%
   mutate(mod = "BCR")
 
 power_results <- bind_rows(route_power, bcr_power)
-
-theme_set(theme_classic(base_size = 15))
 
 ggplot(power_results, aes(x = sig.level, y = power, color = mod)) + geom_line(cex = 1) +
   labs(x = "Significance level", y = "Power", color = "Scale of model") +
