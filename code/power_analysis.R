@@ -162,10 +162,8 @@ bcr_turnover_model <- bcr_turnover %>%
     jaccard < 1 ~ logit(jaccard)))
 
 route_turnover_mod <- lm(logit_jac ~ tmax + tmin + cover_change + edge_change, data = route_turnover_model)
-# route_turnover_mod <- glm(cbind(success,fail) ~ tmax + tmin + cover_change + edge_change, data = route_turnover, family = binomial(link = "logit"))
 
 bcr_turnover_mod <- lm(logit_jac ~ mean_tmax + mean_tmin + mean_cover + mean_edge, data = bcr_turnover_model)
-# bcr_turnover_mod <- glm(cbind(success,fail) ~ mean_tmax + mean_tmin + mean_cover + mean_edge, data = bcr_turnover, family = binomial(link = "logit"))
 
 ### Power analysis of current model
 

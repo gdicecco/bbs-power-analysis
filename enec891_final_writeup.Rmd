@@ -1,0 +1,331 @@
+---
+title: "ENEC 891 Fall 2019 Final"
+author: "Grace Di Cecco"
+date: "12/11/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(sf)
+library(purrr)
+library(pwr)
+library(ggplot2)
+
+theme_set(theme_classic(base_size = 15))
+
+```
+
+## Introduction
+
+Anthropogenic change is impacting ecological communities through a variety of mechanisms: two important drivers of change are land use and climate change. Species are impacted by changes in mean temperature and by both total habitat loss and habitat fragmentation (Haddad et al., 2015; Parmesan & Yohe, 2003). While studies have not found consistent local losses in biodiversity in many taxonomic groups, there has been evidence of turnover above levels predicted by null or neutral models (Dornelas et al., 2014; Vellend et al., 2017). As a result, there is a need for studies examining community compositional change and the importance of anthropogenic change drivers influencing that turnover.
+
+Using long-term observational data sets of North American breeding bird communities, the Breeding Bird Survey, I will assess the relative contribution of climate change (measured as mean minimum and maximum temperature during the breeding season) and land use change (change in forest cover and change in forest edge density) in driving turnover in breeding bird communities at multiple scales. I predict that at smaller scales, land use change drivers will have stronger explanatory power in a model of species turnover, while at larger scales, climatic changes will be more important. 
+
+In order to assess the sensitivity of the ability of these models to detect change in bird species turnover, I conduct a power analysis to answer two questions: 1) what is the change in power of the model to detect effects of explanatory variables as BBS survey locations are aggregated to larger scales and 2) given that BBS routes are about half as dense in the western US as they are in the eastern US, how does this spatial bias impact the power of this analysis?
+
+## Data cleaning
+ 
+Here I assessed changes in breeding bird communities between 1990 and 2017 excluding nocturnal species, water birds, and birds of prey as these groups are not well sampled by the BBS point count methodology. 
+
+I determined land cover within a 5-km buffer at 30 by 30 meter resolution around each forested BBS survey route from the National Landcover Database (NLCD) for US routes and the Agriculture and Agri-food Canada Land Use dataset (AAFC) for Canadian routes (Agriculture and Agri-food Canada, 2015; Vogelmann et al., 2001; Yang et al., 2018). I simplified NLCD land cover to eight classes to enable comparison between the 1992 and 2016 datasets: mixed, deciduous, and coniferous forest were grouped into one forest class, and high, medium, and low-density urban were grouped into one class. I measured forest fragmentation at each BBS survey route in 1992 and 2016 for US routes and 1990 and 2010 for Canadian routes using edge density, which is equal to the sum of the perimeters of all forest patches in a landscape divided by landscape area (Vanderwal, Falconi, Januchowski, & Shoo, 2019). I calculated the change in forest edge density and the change in proportion forest cover between 1992 and 2016 for US routes from the NLCD, and change between 1990 and 2010 for Canadian routes from the AAFC, and divided values by the number of years of change the dataset represents (25 for NLCD, 21 for AAFC). Low values of forest edge density indicate mostly intact forests covering the landscape, while higher values indicate more fragmented forests. BBS routes with greater than 50% of the total change in edge density during the time period occurring between 2013 and 2016 were removed from the analysis, to ensure that bird communities had sufficient time to respond to changing conditions on the survey landscape.
+
+I calculated average minimum and maximum temperature at a 5km buffer around each forested BBS survey route from monthly Daymet temperature data (Thornton et al., 2018) for the breeding season at 1-km2 resolution (May, June, July) and used simple linear regression to determine the trend in annual average breeding season minimum and maximum temperature from 1992 to 2016 on US routes and 1990 to 2010 on Canadian routes.
+
+```{r, message = FALSE, warning = FALSE}
+### Read in data
+
+## BBS
+
+routes <- read.csv("/Volumes/hurlbertlab/Databases/BBS/2017/bbs_routes_20170712.csv")
+weather <- read.csv("/Volumes/hurlbertlab/Databases/BBS/2017/bbs_weather_20170712.csv")
+counts <- read.csv("/Volumes/hurlbertlab/Databases/BBS/2017/bbs_counts_20170712.csv")
+species <- read.csv("/Volumes/hurlbertlab/Databases/BBS/2017/bbs_species_20170712.csv")
+
+routes$stateroute <- routes$statenum*1000 + routes$route
+weather$stateroute <-weather$statenum*1000 + weather$route
+RT1 <- subset(weather, runtype == 1, select = c("stateroute", "year"))
+RT1.routes <- merge(RT1, routes[ , c("countrynum", "statenum", "stateroute", "latitude", "longitude","bcr")], by = "stateroute", all.x = TRUE)
+counts$stateroute <- counts$statenum*1000 + counts$route
+
+# Diurnal land birds, no birds of prey
+species_list <- species %>%  
+  filter(aou > 2880) %>%
+  filter(aou < 3650 | aou > 3810) %>%
+  filter(aou < 3900 | aou > 3910) %>%
+  filter(aou < 4160 | aou > 4210) %>%
+  filter(aou != 7010) %>%
+  filter(sporder != "Accipitriformes", 
+         sporder != "Falconiformes", 
+         sporder != "Anseriformes",
+         sporder != "Cathartiformes")
+
+counts.subs <- counts %>%
+  inner_join(RT1.routes, by = c("statenum", "stateroute", "year")) %>% # Remove RT = 0 route-years
+  filter(aou %in% species_list$aou) %>% # Only diurnal land bird species, no birds of prey
+  filter(rpid == 101) %>%
+  filter(year >= 1990, year < 2017)
+
+## BCRs
+
+bcrs <- read_sf("/Volumes/hurlbertlab/DiCecco/bcr_terrestrial_shape/BCR_terrestrial_master.shp") %>%
+  filter(COUNTRY == "USA" | COUNTRY == "CANADA") %>%
+  st_crop(c(xmin = -178, ymin = 18.9, xmax = -53, ymax = 60)) %>%
+  filter(PROVINCE_S != "ALASKA" & PROVINCE_S != "HAWAIIAN ISLANDS" & PROVINCE_S != "NUNAVUT" & PROVINCE_S != "NORTHWEST TERRITORIES" & PROVINCE_S != "YUKON") %>%
+  filter(WATER == 3)
+
+## ENV change at BBS routes
+
+env_change <- read.csv("data/bbs_route_env_change.csv", stringsAsFactors = F) %>%
+  rename(cover_change = "deltaProp",
+         edge_change = "deltaED")
+
+## ENV change at BCRs
+
+bcr_change <- env_change %>%
+  left_join(dplyr::select(routes, stateroute, longitude, latitude)) %>%
+  st_as_sf(coords = c("longitude", "latitude")) %>%
+  st_set_crs(st_crs(bcrs)) %>%
+  st_intersection(bcrs) %>%
+  group_by(BCR) %>%
+  summarize(mean_tmax = mean(tmax, na.rm = T),
+            mean_tmin = mean(tmin, na.rm = T),
+            mean_cover = mean(cover_change, na.rm = T),
+            mean_edge = mean(edge_change, na.rm = T)) %>%
+  st_set_geometry(NULL)
+```
+
+## Power analysis
+
+Species turnover for each BBS community was calculated using the Jaccard dissimilarity index (Jaccard, 1912). I calculated Jaccard dissimilarity between species observed from 1990-1994 and 2013-2017. Species occurring at least two out of five years were included. Jaccard dissimilarity (with a logit transformation) was used as the response variable in a linear model with four predictor variables: trend in minimum temperature during the breeding season, trend in maximum temperature during the breeding season, change in proportion forest cover per year, and change in forest edge density per year. 
+
+For the scale analysis, I fit this model at two scales: each BBS route as a data point and aggregating BBS routes to the ecoregion level, using Bird Conservation Regions from the North American Bird Conservation Initiative  (http://nabci-us.org/resources/bird-conservation-regions-map/). I averaged environmental change across routes in an ecoregion, and used the pool of species observed in the two time windows in the whole ecoregion to calculate Jaccard dissimilarity at the coarser spatial scale.
+
+To examine the effect of spatial bias in BBS routes, I compared the route-level model to a model in which I randomly subsampled BBS routes east of -100 degrees West to have the same sampling density as routes west of -100 degrees West, which resulted in a decrease in sample size of about 50% for the eastern US.
+
+I used an analytic soution to calculate power for each linear model using R packge "pwr" (Champely et al., 2018). For the observed model R^2^ and degrees of freedom, I calculated power for p-values from 0.0001 to 0.2. 
+
+```{r, message = FALSE, warning = FALSE}
+### Format data - species turnover at 2 scales - route, BCR
+
+temporal_turnover <- function(specieslist1, specieslist2) {
+  gamma <- length(unique(c(specieslist1, specieslist2)))
+  intersec <- length(specieslist1[specieslist1 %in% specieslist2])
+  jaccard <- (gamma - intersec)/gamma
+  success <- gamma - intersec
+  fail <- intersec
+  res <- data.frame(jaccard = jaccard, success = success, fail = fail)
+  return(res)
+}
+
+route_turnover <- counts.subs %>%
+    filter(stateroute %in% env_change$stateroute) %>%
+    group_by(stateroute) %>%
+    nest() %>%
+    mutate(jaccard = purrr::map(data, ~{
+      df <- .
+      
+      df_early <- df %>%
+        filter(year <= 1994) %>%
+        group_by(aou) %>%
+        filter(n_distinct(year) > 1) %>%
+        ungroup()
+      sp_early <- unique(df_early$aou)
+      
+      df_late <- df %>%
+        filter(year >= 2013) %>%
+        filter(n_distinct(year) > 1) %>%
+        ungroup()
+      sp_late <- unique(df_late$aou)
+      
+      temporal_turnover(sp_early, sp_late)
+    })) %>%
+    dplyr::select(-data) %>%
+  unnest(cols = c(jaccard)) %>%
+  left_join(env_change)
+
+bcr_turnover <- counts.subs %>%
+  filter(stateroute %in% env_change$stateroute) %>%
+  group_by(bcr) %>%
+  nest() %>%
+  mutate(jaccard = purrr::map(data, ~{
+    df <- .
+    
+    df_early <- df %>%
+      filter(year <= 1994) %>%
+      group_by(aou) %>%
+      filter(n_distinct(year) > 1) %>%
+      ungroup()
+    sp_early <- unique(df_early$aou)
+    
+    df_late <- df %>%
+      filter(year >= 2013) %>%
+      filter(n_distinct(year) > 1) %>%
+      ungroup()
+    sp_late <- unique(df_late$aou)
+    
+    temporal_turnover(sp_early, sp_late)
+  })) %>%
+  dplyr::select(-data) %>%
+  unnest(cols = c(jaccard)) %>%
+  left_join(bcr_change, by = c("bcr" = "BCR"))
+  
+### Build model for power analysis: species turnover at a route over time ~ env change at 3 scales
+
+e <- min(route_turnover$jaccard, na.rm = T)/2
+
+logit <- function(x) {
+  logit <- log(x/(1 - x))
+  return(logit)
+}
+
+logit_e <- function(x) {
+  logit <- log((x- e)/(1 - (x - e)))
+  return(logit)
+}
+
+route_turnover_model <- route_turnover %>%
+  filter(!is.na(jaccard)) %>%
+  mutate(logit_jac = case_when(
+                               jaccard == 1 ~ logit_e(jaccard),
+                               jaccard < 1 ~ logit(jaccard)))
+
+e <- min(bcr_turnover$jaccard, na.rm = T)/2
+
+bcr_turnover_model <- bcr_turnover %>%
+  filter(!is.na(jaccard)) %>%
+  mutate(logit_jac = case_when(
+    jaccard == 1 ~ logit_e(jaccard),
+    jaccard < 1 ~ logit(jaccard)))
+
+route_turnover_mod <- lm(logit_jac ~ tmax + tmin + cover_change + edge_change, data = route_turnover_model)
+
+bcr_turnover_mod <- lm(logit_jac ~ mean_tmax + mean_tmin + mean_cover + mean_edge, data = bcr_turnover_model)
+
+### Power analysis of current model: scale of analysis
+
+power_analysis <- function(model, alpha) {
+  sum <- summary(model)
+  rsq <- sum$r.squared
+  f2 <- rsq/(1 - rsq)
+  numdf <- sum$fstatistic[[2]]
+  dendf <- sum$fstatistic[[3]]
+  
+  pwr.f2.test(numdf, dendf, f2, alpha)
+}
+
+power_analysis_output <- function(model, pvals) {
+  map_df(pvals, ~{
+    p <- .
+    pwr <- power_analysis(model, p)
+    flatten_dfc(pwr)
+  })
+}
+
+pvals <- seq(0.0001, 0.2, by = 0.005)
+
+route_power <- power_analysis_output(route_turnover_mod, pvals) %>%
+  mutate(mod = "Stateroute")
+bcr_power <- power_analysis_output(bcr_turnover_mod, pvals) %>%
+  mutate(mod = "BCR")
+
+power_results <- bind_rows(route_power, bcr_power)
+
+### Power analysis: artificially decrease number of routes, how does power change
+
+# What would power be for whole US model if I resample from routes to give same density in east as western
+
+na_area_west <- bcrs %>%
+  st_crop(c(xmin = -178, ymin = 18.9, xmax = -100, ymax = 60)) %>%
+  st_union() %>%
+  st_area()
+
+na_area_east <- bcrs %>%
+  st_crop(c(xmin = -100, ymin = 18.9, xmax = -50, ymax = 60)) %>%
+  st_union() %>%
+  st_area()
+
+regional_power <- route_turnover_model %>%
+  left_join(dplyr::select(routes, stateroute, latitude, longitude)) %>%
+  mutate(region = case_when(longitude < -100 ~ "West",
+                            longitude > -100 ~ "East")) %>%
+  group_by(region) %>%
+  summarize(nRoutes = n_distinct(stateroute))
+
+west_density <- regional_power$nRoutes[[2]]/na_area_west
+east_new_nRoutes <- as.numeric(round(west_density*na_area_east))
+
+eastern_routes <- route_turnover_model %>%
+  left_join(dplyr::select(routes, stateroute, latitude, longitude)) %>%
+  mutate(region = case_when(longitude < -100 ~ "West",
+                            longitude > -100 ~ "East")) %>%
+  filter(region == "East")
+
+new_eastern_routes <- eastern_routes[sample(nrow(eastern_routes), east_new_nRoutes), ]
+
+subsampled_bbs <- route_turnover_model %>%
+  left_join(dplyr::select(routes, stateroute, latitude, longitude)) %>%
+  mutate(region = case_when(longitude < -100 ~ "West",
+                            longitude > -100 ~ "East")) %>%
+  filter(region == "West") %>%
+  bind_rows(new_eastern_routes)
+
+subsampled_mod <- lm(logit_jac ~ tmax + tmin + cover_change + edge_change, data = subsampled_bbs)
+
+subsampled_power <- power_analysis_output(subsampled_mod, pvals) %>%
+  mutate(mod = "Western US density") %>%
+  bind_rows(filter(route_power, mod == "Stateroute"))
+
+```
+
+## Results
+
+#### Scale analysis
+
+I found that there was a substantial difference in the model's power to detect effects at different geographic scales. The route-level model had close to 100% power to detect effects at significance levels greater than 0.025, while the ecoregion-level model had below 50% power to detect effects below a significance level of 0.15.
+
+```{r, echo = FALSE}
+ggplot(power_results, aes(x = sig.level, y = power, color = mod)) + geom_line(cex = 1) +
+  labs(x = "Significance level", y = "Power", color = "Scale of model") +
+  scale_color_manual(values = c("springgreen3", "skyblue3"))
+```
+
+#### Spatial bias analysis
+
+Randomly subsampling BBS routes east of -100 degrees West did result in somewhat lower power than the model including all routes, but did not substantially change the power of the model to detect the estimated effect sizes for these explanatory variables. In both models, power to detect effects at significance levels above 0.002 is above 80%.
+
+```{r, echo = FALSE}
+ggplot(subsampled_power, aes(x = sig.level, y = power, color = mod)) + geom_line(cex = 1) +
+  labs(x = "Significance level", y = "Power", color = "Sample of model") +
+  scale_color_manual(values = c("springgreen3", "skyblue3"))
+```
+
+## Conclusions 
+
+This analysis provided useful information to consider as I develop this project further: first, while there is spatial bias in where BBS routes are distributed geographically, at the route-level the sample size of the data set is high enough to sacrifice some data in order to reduce spatial sampling bias without substantially impacting the power of the model to detect effects at very low significance levels. Second, I will need to rethink the level of spatial aggregation I will do in this analysis. While aggregating to the ecoregion level is a natural coarse-scale grouping of BBS routes, substantial power is lost in the analysis making it difficult to detect effects of anthropogenic change drivers on species turnover. Furthermore, at larger scales, variation in the response variable, Jaccard dissimilarity, is likely to decrease as well. At the level of ecoregion, there likely has not been extreme changes in the species pool over the last two decades. Both the reduced sample size of aggregating routes to the ecoregion level and decreased variation in the response variable to be explained likely contribute to very low power of the model at this scale. Going forward, I will examine a more continuous range of scale aggregations, but no larger than about 1 by 1 degree latitude.
+
+### Works Cited
+
+Agriculture and Agri-Food Canada. (2015). Land Use 1990, 2000 & 2010. Retrieved from https://open.canada.ca/data/en/dataset/18e3ef1a-497c-40c6-8326-aac1a34a0dec
+
+Champely, S., Ekstrom, C., Dalgaard, P., Gill, J., Weibelzahl, S., Anandkumar, A., Ford, C., Volcic, R., & De Rosario, H. (2018). Package 'pwr.' https://CRAN.R-project.org/package=pwr
+
+Dornelas, M., Gotelli, N. J., McGill, B., Shimadzu, H., Moyes, F., Sievers, C., & Magurran, A. E. (2014). Assemblage time series reveal biodiversity change but not systematic loss. Science, 344, 296–299.
+
+Haddad, N. M., Brudvig, L. A., Clobert, J., Davies, K. F., Gonzalez, A., Holt, R. D., … Townshend, J. R. (2015). Habitat fragmentation and its lasting impact on Earth’s ecosystems. Science Advances. https://doi.org/10.1126/sciadv.1500052
+
+Jaccard, P. (1912) The distribution of the flora in the alpine zone. New Phytologist, 11, 37–50.
+
+Parmesan, C., & Yohe, G. (2003). A globally coherent fingerprint of climate change impacts across natural systems. Nature. https://doi.org/10.1038/nature01286
+
+Thornton, P. E., Thornton, M. M., Mayer, B. W., Wei, Y., Devarakonda, R., Vose, R. S., & Cook, R. B. (2018). Daymet: Daily Surface Weather Data on a 1-km Grid for Northa America, Version 3. https://doi.org/https://doi.org/10.3334/ORNLDAAC/1328
+
+Vanderwal, A. J., Falconi, L., Januchowski, S., & Shoo, L. (2019). Package ‘ SDMTools .’  https://CRAN.R-project.org/package=SDMTools 
+
+Vellend, M., Dornelas, M., Baeten, L., Beauséjour, R., Brown, C. D., De Frenne, P., … Sievers, C. (2017). Estimates of local biodiversity change over time stand up to scrutiny. Ecology. https://doi.org/10.1002/ecy.1660
+
+Vogelmann, J. E., Van Driel, N., Howard, S. M., Yang, L., Larson, C. R., & Wylie, B. K. (2001). Completion of the 1990s National Land Cover Data Set for the Conterminous United States From LandSat Thematic Mapper Data and Ancillary Data Sources. Photogrammetric Engineering & Remote Sensing2, 67(6), 650–662.
+
+Yang, L., Jin, S., Danielson, P., Homer, C., Gass, L., Bender, S. M., … Xian, G. (2018). A new generation of the United States National Land Cover Database: Requirements, research priorities, design, and implementation strategies. ISPRS Journal of Photogrammetry and Remote Sensing, 146(August), 108–123. https://doi.org/10.1016/j.isprsjprs.2018.09.006
